@@ -1,1 +1,202 @@
-dfvd
+<!DOCTYPE html>
+<html lang="es"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Prototipo – Cañón Molecular</title>
+<style>
+:root{--bg:#03222e;--fg:#d8f3ff;--panel:rgba(4,24,34,.82);--acc:#35e0ff;box-sizing:border-box;padding-top:env(safe-area-inset-top,0px);padding-bottom:env(safe-area-inset-bottom,0px)}
+@media (prefers-color-scheme: dark){:root:not([data-theme="light"]){--bg:#03222e;--fg:#d8f3ff;--panel:rgba(4,24,34,.82)}}
+:root[data-theme="dark"]{--bg:#03222e;--fg:#d8f3ff;--panel:rgba(4,24,34,.82)}
+html{scroll-padding-top:env(safe-area-inset-top,0px)}
+html,body{height:100%;margin:0;background:var(--bg);color:var(--fg);font:14px/1.4 system-ui,-apple-system,"Segoe UI",sans-serif;overflow:hidden}
+canvas{display:block}
+#hud{position:fixed;left:10px;top:calc(10px + env(safe-area-inset-top,0px));width:260px;max-width:70vw;background:var(--panel);border:1px solid #35e0ff44;border-radius:10px;padding:10px 12px;max-height:90vh;overflow:auto}
+#hud h1{font-size:15px;margin:0 0 4px;color:var(--acc)}
+#hud small{opacity:.8;display:block;margin-bottom:6px}
+.row{display:flex;align-items:center;gap:6px;margin:3px 0;font-size:12px}
+.row label{flex:0 0 92px}.row input{flex:1;min-width:0}.row output{width:34px;text-align:right}
+#state{font-weight:700;margin:6px 0;color:var(--acc)}
+#cross{position:fixed;left:50%;top:50%;width:14px;height:14px;margin:-7px;border:2px solid #fff9;border-radius:50%;pointer-events:none}
+#msg{position:fixed;left:50%;bottom:60px;transform:translateX(-50%);background:var(--panel);padding:8px 14px;border-radius:8px;text-align:center}
+#vr{position:fixed;right:12px;bottom:calc(12px + env(safe-area-inset-bottom,0px));display:none;padding:10px 16px;border:0;border-radius:8px;background:var(--acc);color:#012;font-weight:700}
+</style></head><body>
+<div id="hud">
+<h1>Cañón Molecular · prototipo</h1>
+<small><b>Click</b> en la escena para capturar el mouse (Esc lo suelta para ajustar sliders).<br>
+<b>WASD</b> mover · <b>Q/E</b> bajar/subir · <b>Shift</b> rápido · <b>R</b> reiniciar<br>
+<b>Clic DERECHO (mantener)</b> = JALAR y sostener · <b>Rueda</b> = distancia<br>
+<b>Clic IZQUIERDO</b> = LANZAR lo sostenido / empujar lo apuntado<br>
+<b>Quest:</b> Grip = atraer · Gatillo = lanzar/empujar · Joystick izq = mover · Joystick der ↑↓ = subir/bajar</small>
+<div id="state">Estado: libre</div>
+<div id="count">Receptor: 0 / 8</div>
+<div id="sliders"></div>
+</div>
+<div id="cross"></div>
+<div id="msg">Lleva 8 átomos al receptor verde. Los glóbulos rojos se jalan y lanzan; los leucocitos solo se empujan.</div>
+<button id="vr">Entrar a VR</button>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+<script>
+// ===== PARÁMETROS AJUSTABLES (pasarlos tal cual al equipo de Unity) =====
+const P={range:16,pull:35,hold:4,launch:22,drag:0.6};
+const LIM={range:[6,30,1],pull:[10,80,1],hold:[1.5,8,.1],launch:[8,50,1],drag:[0,2,.05]};
+const GOAL=8, R=22;
+
+const scene=new THREE.Scene();scene.background=new THREE.Color(0x03222e);scene.fog=new THREE.FogExp2(0x03222e,.03);
+const renderer=new THREE.WebGLRenderer({antialias:true});
+renderer.setPixelRatio(Math.min(devicePixelRatio,2));renderer.setSize(innerWidth,innerHeight);
+renderer.xr.enabled=true;document.body.appendChild(renderer.domElement);
+const cam=new THREE.PerspectiveCamera(70,innerWidth/innerHeight,.05,100);
+const rig=new THREE.Group();rig.add(cam);rig.position.set(0,0,8);scene.add(rig);
+scene.add(new THREE.HemisphereLight(0x9fe8ff,0x103040,1.2));
+const dl=new THREE.DirectionalLight(0xffffff,.8);dl.position.set(3,6,4);scene.add(dl);
+
+// Entorno: membrana + partículas
+scene.add(new THREE.Mesh(new THREE.SphereGeometry(R,32,24),new THREE.MeshBasicMaterial({color:0x0a6a80,wireframe:true,transparent:true,opacity:.25,side:THREE.BackSide})));
+{const n=500,a=new Float32Array(n*3);for(let i=0;i<n;i++){const v=new THREE.Vector3(Math.random()-.5,Math.random()-.5,Math.random()-.5).setLength(Math.random()*R);a.set([v.x,v.y,v.z],i*3)}
+const g=new THREE.BufferGeometry();g.setAttribute('position',new THREE.BufferAttribute(a,3));
+scene.add(new THREE.Points(g,new THREE.PointsMaterial({color:0x9fe8ff,size:.06,transparent:true,opacity:.6})))}
+
+// Receptor (meta)
+const rec=new THREE.Group();rec.position.set(0,0,-13);
+const recMat=new THREE.MeshStandardMaterial({color:0x7dff6a,emissive:0x7dff6a,emissiveIntensity:.3});
+rec.add(new THREE.Mesh(new THREE.TorusGeometry(2,.14,12,40),recMat));
+rec.add(new THREE.Mesh(new THREE.SphereGeometry(1.8,20,14),new THREE.MeshBasicMaterial({color:0x7dff6a,transparent:true,opacity:.12})));
+scene.add(rec);let pulse=0;
+
+// Objetos físicos
+let items=[],count=0;
+const gm=(g,c,e=.3,op=1)=>new THREE.Mesh(g,new THREE.MeshStandardMaterial({color:c,emissive:c,emissiveIntensity:e,roughness:.4,transparent:op<1,opacity:op}));
+function atom(){const g=new THREE.Group();g.add(gm(new THREE.SphereGeometry(.22,16,12),0x35e0ff));g.userData.orb=[];
+ [[0,0],[1.1,.6]].forEach(([rx,rz])=>{const o=new THREE.Group();o.rotation.set(rx,0,rz);
+  const ring=new THREE.Mesh(new THREE.TorusGeometry(.4,.008,6,32),new THREE.MeshBasicMaterial({color:0x9fe8ff}));ring.rotation.x=Math.PI/2;o.add(ring);
+  const p=new THREE.Group(),e=gm(new THREE.SphereGeometry(.07,10,8),0xffffff,.8);e.position.x=.4;p.add(e);o.add(p);g.userData.orb.push(p);g.add(o)});return g}
+function rbc(){const g=new THREE.Group(),t=gm(new THREE.TorusGeometry(.38,.22,12,24),0xd62839);t.rotation.x=Math.PI/2;
+ const d=gm(new THREE.CylinderGeometry(.4,.4,.1,20),0xb01e2f);g.add(t,d);return g}
+function wbc(){const g=new THREE.Group();g.add(gm(new THREE.SphereGeometry(1.1,20,14),0xcfc3ff,.25,.8));
+ g.add(gm(new THREE.IcosahedronGeometry(.55,1),0x6a3fb5,.4));
+ for(let i=0;i<10;i++){const v=new THREE.Vector3(Math.random()-.5,Math.random()-.5,Math.random()-.5).setLength(1.1);const k=gm(new THREE.SphereGeometry(.12,8,6),0xcfc3ff,.3);k.position.copy(v);g.add(k)}return g}
+const TYPES={
+ light:{build:atom,name:'átomo',mass:1,r:.4},
+ medium:{build:rbc,name:'glóbulo rojo',mass:3,r:.62},
+ heavy:{build:wbc,name:'leucocito (pesado)',mass:6,r:1.1,heavy:true}};
+function mk(type,x,y,z){const T=TYPES[type],mesh=T.build();mesh.position.set(x,y,z);mesh.rotation.set(Math.random()*6,Math.random()*6,0);scene.add(mesh);
+ items.push({mesh,vel:new THREE.Vector3(),mass:T.mass,r:T.r,type,name:T.name,heavy:!!T.heavy,held:false})}
+const setE=(it,v)=>it.mesh.traverse(c=>{if(c.material&&c.material.emissive)c.material.emissiveIntensity=v});
+function build(){items.forEach(i=>scene.remove(i.mesh));items=[];count=0;pulse=0;
+ const rnd=(a,b)=>a+Math.random()*(b-a);
+ for(let i=0;i<12;i++)mk('light',rnd(-7,7),rnd(-4,5),rnd(-5,4));
+ for(let i=0;i<3;i++)mk('medium',rnd(-7,7),rnd(-4,5),rnd(-5,4));
+ mk('heavy',0,0,-8.5);mk('heavy',3.2,1,-8);mk('heavy',-3.2,-1,-8);mk('heavy',6,3,-3);
+ hud()}
+function hud(){$('count').textContent='Receptor: '+count+' / '+GOAL+(count>=GOAL?'  ✔ ¡Activado!':'')}
+
+// Pistola
+function mkGun(){const g=new THREE.Group();
+ const b=new THREE.Mesh(new THREE.CylinderGeometry(.03,.045,.28,12),new THREE.MeshStandardMaterial({color:0x22313a,metalness:.6,roughness:.4}));b.rotation.x=Math.PI/2;g.add(b);
+ const r=new THREE.Mesh(new THREE.TorusGeometry(.05,.01,8,16),new THREE.MeshBasicMaterial({color:0x35e0ff}));r.position.z=-.14;g.add(r);
+ const m=new THREE.Object3D();m.position.z=-.16;g.add(m);g.userData={muz:m,ring:r};return g}
+const beamMat=new THREE.LineBasicMaterial({color:0x35e0ff});
+function mkHand(aim,gun){const bg=new THREE.BufferGeometry().setFromPoints([new THREE.Vector3(),new THREE.Vector3()]);
+ const beam=new THREE.Line(bg,beamMat);beam.frustumCulled=false;beam.visible=false;scene.add(beam);
+ return{aim,gun,muz:gun.userData.muz,beam,grab:false,fire:false,held:null,target:null,cand:null,cool:0,lock:false,vr:false,state:'libre'}}
+const hands=[];
+const dg=mkGun();dg.scale.setScalar(2.5);dg.position.set(.22,-.2,-.45);cam.add(dg);
+const desk=mkHand(cam,dg);hands.push(desk);
+for(let i=0;i<2;i++){const c=renderer.xr.getController(i);rig.add(c);const g=mkGun();c.add(g);
+ const h=mkHand(c,g);h.vr=true;hands.push(h);
+ c.addEventListener('squeezestart',()=>h.grab=true);c.addEventListener('squeezeend',()=>h.grab=false);
+ c.addEventListener('selectstart',()=>h.fire=true)}
+
+// ===== Lógica del cañón =====
+const o=new THREE.Vector3(),d=new THREE.Vector3(),q=new THREE.Quaternion(),t=new THREE.Vector3(),hp=new THREE.Vector3(),mp=new THREE.Vector3();
+function pick(range){let best=null,bt=1e9;
+ for(const it of items){t.subVectors(it.mesh.position,o);const s=t.dot(d);if(s<.4||s>range)continue;
+  const perp=t.addScaledVector(d,-s).length();if(perp<it.r+s*.1&&s<bt){bt=s;best=it}}return best}
+function updateHand(h,dt){
+ h.aim.getWorldPosition(o);h.aim.getWorldQuaternion(q);d.set(0,0,-1).applyQuaternion(q);
+ h.muz.getWorldPosition(mp);h.cool=Math.max(0,h.cool-dt);
+ if(!h.grab){h.lock=false;if(h.held){h.held.held=false;h.held=null}h.target=null}
+ if(!h.held)h.cand=pick(P.range);else h.cand=h.held;
+ h.state=h.cand?'apuntando a '+h.cand.name+(h.cand.heavy?' (solo se puede empujar)':''):'libre';
+ if(h.grab&&!h.lock){
+  if(!h.held&&!h.target&&h.cand&&!h.cand.heavy&&!h.cand.held&&h.cool<=0)h.target=h.cand;
+  hp.copy(o).addScaledVector(d,P.hold);
+  if(h.target&&!h.held){const it=h.target;t.subVectors(hp,it.mesh.position);const dist=t.length();
+   if(dist<.5){h.held=it;it.held=true;h.target=null}
+   else if(it.mesh.position.distanceTo(o)>P.range*1.4){h.target=null}
+   else{it.vel.addScaledVector(t.normalize(),P.pull*dt/Math.sqrt(it.mass));if(it.vel.length()>14)it.vel.setLength(14);h.state='jalando '+it.name}}
+  if(h.held){const it=h.held;it.vel.copy(t.subVectors(hp,it.mesh.position)).multiplyScalar(10/Math.sqrt(it.mass));h.state='sosteniendo '+it.name}}
+ if(h.fire){h.fire=false;
+  if(h.cool<=0){h.cool=.35;
+   if(h.held){const it=h.held;it.held=false;h.held=null;h.target=null;h.lock=true;it.vel.copy(d).multiplyScalar(P.launch/Math.sqrt(it.mass))}
+   else{const it=pick(P.range*.8);if(it)it.vel.addScaledVector(d,P.launch*1.6/it.mass)}
+   h.gun.userData.ring.scale.setScalar(2.2)}}
+ const g=h.gun.userData.ring;g.scale.lerp(new THREE.Vector3(1,1,1),.2);
+ const tgt=h.held||h.target;h.beam.visible=!!tgt;
+ if(tgt){const p=h.beam.geometry.attributes.position;p.setXYZ(0,mp.x,mp.y,mp.z);p.setXYZ(1,tgt.mesh.position.x,tgt.mesh.position.y,tgt.mesh.position.z);p.needsUpdate=true}}
+
+// ===== Física =====
+function physics(dt){
+ for(const it of items){const m=it.mesh,v=it.vel;
+  v.multiplyScalar(Math.exp(-P.drag*dt));
+  if(!it.held&&!it.heavy){v.x+=(Math.random()-.5)*.6*dt;v.y+=(Math.random()-.5)*.6*dt;v.z+=(Math.random()-.5)*.6*dt}
+  m.position.addScaledVector(v,dt);m.rotation.y+=dt*.3;if(m.userData.orb)m.userData.orb.forEach((p,i)=>p.rotation.y+=dt*(4+i*2));
+  const dist=m.position.length();if(dist>R-it.r){const n=m.position.clone().divideScalar(dist);m.position.copy(n).multiplyScalar(R-it.r);const vn=v.dot(n);if(vn>0)v.addScaledVector(n,-1.6*vn)}}
+ for(let i=0;i<items.length;i++)for(let j=i+1;j<items.length;j++){const a=items[i],b=items[j];
+  t.subVectors(b.mesh.position,a.mesh.position);const dist=t.length(),min=a.r+b.r;
+  if(dist<min&&dist>1e-4){t.divideScalar(dist);const ia=1/a.mass,ib=1/b.mass,ov=min-dist;
+   a.mesh.position.addScaledVector(t,-ov*ia/(ia+ib));b.mesh.position.addScaledVector(t,ov*ib/(ia+ib));
+   const vr=b.vel.clone().sub(a.vel).dot(t);if(vr<0){const J=-1.7*vr/(ia+ib);a.vel.addScaledVector(t,-J*ia);b.vel.addScaledVector(t,J*ib)}}}
+ for(let i=items.length-1;i>=0;i--){const it=items[i];
+  if(it.type==='light'&&it.mesh.position.distanceTo(rec.position)<1.9){
+   for(const h of hands){if(h.held===it)h.held=null;if(h.target===it)h.target=null}
+   scene.remove(it.mesh);items.splice(i,1);count++;pulse=1;hud()}}
+ pulse*=Math.exp(-3*dt);rec.scale.setScalar(1+pulse*.3);recMat.emissiveIntensity=.3+count/GOAL*.9+pulse}
+
+// ===== Movimiento y entrada =====
+const keys={};let locked=false;const $=id=>document.getElementById(id);
+addEventListener('keydown',e=>{keys[e.code]=true;if(e.code==='KeyR')build()});addEventListener('keyup',e=>keys[e.code]=false);
+renderer.domElement.addEventListener('click',()=>{if(!renderer.xr.isPresenting)renderer.domElement.requestPointerLock&&renderer.domElement.requestPointerLock()});
+document.addEventListener('pointerlockchange',()=>{locked=document.pointerLockElement===renderer.domElement;$('msg').textContent=locked?'Lleva 8 átomos al receptor verde. Los glóbulos rojos se jalan y lanzan; los leucocitos solo se empujan.':'Haz click en la escena para activar los controles'});
+addEventListener('mousemove',e=>{if(!locked)return;rig.rotation.y-=e.movementX*.002;cam.rotation.x=Math.max(-1.5,Math.min(1.5,cam.rotation.x-e.movementY*.002))});
+addEventListener('mousedown',e=>{if(!locked)return;if(e.button===0)desk.fire=true;if(e.button===2)desk.grab=true});
+addEventListener('mouseup',e=>{if(e.button===2)desk.grab=false});
+addEventListener('contextmenu',e=>e.preventDefault());
+addEventListener('wheel',e=>{if(!locked)return;P.hold=Math.max(LIM.hold[0],Math.min(LIM.hold[1],P.hold-Math.sign(e.deltaY)*.3));sync()},{passive:true});
+const fwd=new THREE.Vector3(),side=new THREE.Vector3();
+function move(dt){const sp=(keys.ShiftLeft?8:4)*dt;let f=0,s=0,u=0;
+ if(!renderer.xr.isPresenting){f=(keys.KeyW?1:0)-(keys.KeyS?1:0);s=(keys.KeyD?1:0)-(keys.KeyA?1:0);u=(keys.KeyE?1:0)-(keys.KeyQ?1:0);
+  fwd.set(0,0,-1).applyAxisAngle(new THREE.Vector3(0,1,0),rig.rotation.y)}
+ else{const ses=renderer.xr.getSession();if(ses)for(const src of ses.inputSources){const gp=src.gamepad;if(!gp)continue;
+   const x=Math.abs(gp.axes[2])>.15?gp.axes[2]:0,y=Math.abs(gp.axes[3])>.15?gp.axes[3]:0;
+   if(src.handedness==='left'){s=x;f=-y}else u=-y}
+  cam.getWorldDirection(fwd);fwd.y=0;fwd.normalize()}
+ side.crossVectors(fwd,new THREE.Vector3(0,1,0));
+ rig.position.addScaledVector(fwd,f*sp).addScaledVector(side,s*sp);rig.position.y+=u*sp;
+ if(rig.position.length()>R-2)rig.position.setLength(R-2)}
+
+// ===== HUD / sliders =====
+const labels={range:'Alcance (m)',pull:'Fuerza atracción',hold:'Dist. sostener',launch:'Fuerza lanzar',drag:'Fricción agua'};
+for(const k in P){const r=document.createElement('div');r.className='row';
+ r.innerHTML=`<label>${labels[k]}</label><input type="range" id="s_${k}" min="${LIM[k][0]}" max="${LIM[k][1]}" step="${LIM[k][2]}" value="${P[k]}"><output id="o_${k}">${P[k]}</output>`;
+ $('sliders').appendChild(r);r.querySelector('input').oninput=e=>{P[k]=+e.target.value;sync()}}
+function sync(){for(const k in P){$('s_'+k).value=P[k];$('o_'+k).textContent=(+P[k]).toFixed(P[k]%1?1:0)}}
+
+// VR
+if(navigator.xr)navigator.xr.isSessionSupported('immersive-vr').then(ok=>{if(!ok)return;const b=$('vr');b.style.display='block';
+ b.onclick=async()=>{const s=await navigator.xr.requestSession('immersive-vr',{optionalFeatures:['local-floor']});renderer.xr.setSession(s);b.style.display='none';
+  $('hud').style.display=$('cross').style.display=$('msg').style.display='none';dg.visible=false;
+  s.addEventListener('end',()=>{b.style.display='block';$('hud').style.display=$('cross').style.display=$('msg').style.display='';dg.visible=true})}}).catch(()=>{});
+
+addEventListener('resize',()=>{cam.aspect=innerWidth/innerHeight;cam.updateProjectionMatrix();renderer.setSize(innerWidth,innerHeight)});
+
+// ===== Loop =====
+const clock=new THREE.Clock();build();
+renderer.setAnimationLoop(()=>{const dt=Math.min(clock.getDelta(),.05);const vr=renderer.xr.isPresenting;
+ move(dt);
+ for(const h of hands){if(h.vr!==vr){h.beam.visible=false;continue}updateHand(h,dt)}
+ for(const it of items)setE(it,.3);
+ for(const h of hands)if((h.vr===vr)&&h.cand)setE(h.cand,.95);
+ physics(dt);
+ if(!vr)$('state').textContent='Estado: '+desk.state;
+ renderer.render(scene,cam)});
+</script></body></html>
